@@ -1,7 +1,6 @@
 #import <AddressBook/AddressBook.h>
 #import <UIKit/UIKit.h>
 #import "RCTContacts.h"
-#import <Contacts/Contacts.h>
 #import <AssetsLibrary/AssetsLibrary.h>
 
 NSString *const RCTContactsChanged = @"ContactsChanged";
@@ -70,6 +69,42 @@ RCT_EXPORT_METHOD(requestPermission:(RCTResponseSenderBlock) callback)
     }];
 }
 
+RCT_EXPORT_METHOD(getContactsMatchingString:(NSString *)string callback:(RCTResponseSenderBlock) callback)
+{
+    CNContactStore *contactStore = [[CNContactStore alloc] init];
+    if (!contactStore)
+        return;
+    [self getContactsFromAddressBook:contactStore matchingString:string callback:callback];
+}
+
+-(void) getContactsFromAddressBook:(CNContactStore *)store
+                    matchingString:(NSString *)searchString
+                          callback:(RCTResponseSenderBlock)callback
+{
+    NSMutableArray *contacts = [[NSMutableArray alloc] init];
+    NSError *contactError = nil;
+    NSArray *keys = @[
+                      CNContactEmailAddressesKey,
+                      CNContactPhoneNumbersKey,
+                      CNContactFamilyNameKey,
+                      CNContactGivenNameKey,
+                      CNContactMiddleNameKey,
+                      CNContactPostalAddressesKey,
+                      CNContactOrganizationNameKey,
+                      CNContactJobTitleKey,
+                      CNContactImageDataAvailableKey,
+                      CNContactBirthdayKey
+                      ];
+    NSArray *arrayOfContacts = [store unifiedContactsMatchingPredicate:[CNContact predicateForContactsMatchingName:searchString]
+                                                           keysToFetch:keys
+                                                                 error:&contactError];
+    [arrayOfContacts enumerateObjectsUsingBlock:^(CNContact * _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
+        NSDictionary *contactDictionary = [self contactToDictionary:obj withThumbnails:NO];
+        [contacts addObject:contactDictionary];
+    }];
+    callback(@[[NSNull null], contacts]);
+}
+
 -(void) getAllContacts:(RCTResponseSenderBlock) callback
         withThumbnails:(BOOL) withThumbnails
 {
@@ -110,7 +145,8 @@ RCT_EXPORT_METHOD(getAllWithoutPhotos:(RCTResponseSenderBlock) callback)
                                        CNContactPostalAddressesKey,
                                        CNContactOrganizationNameKey,
                                        CNContactJobTitleKey,
-                                       CNContactImageDataAvailableKey
+                                       CNContactImageDataAvailableKey,
+                                       CNContactBirthdayKey
                                        ]];
 
     if(withThumbnails) {
@@ -120,7 +156,6 @@ RCT_EXPORT_METHOD(getAllWithoutPhotos:(RCTResponseSenderBlock) callback)
     CNContactFetchRequest * request = [[CNContactFetchRequest alloc]initWithKeysToFetch:keysToFetch];
     BOOL success = [contactStore enumerateContactsWithFetchRequest:request error:&contactError usingBlock:^(CNContact * __nonnull contact, BOOL * __nonnull stop){
         NSDictionary *contactDict = [self contactToDictionary: contact withThumbnails:withThumbnails];
-
         [contacts addObject:contactDict];
     }];
 
@@ -138,7 +173,8 @@ RCT_EXPORT_METHOD(getAllWithoutPhotos:(RCTResponseSenderBlock) callback)
     NSString *middleName = person.middleName;
     NSString *company = person.organizationName;
     NSString *jobTitle = person.jobTitle;
-
+    NSDateComponents *birthday = person.birthday;
+    
     [output setObject:recordID forKey: @"recordID"];
 
     if (givenName) {
@@ -161,6 +197,18 @@ RCT_EXPORT_METHOD(getAllWithoutPhotos:(RCTResponseSenderBlock) callback)
         [output setObject: (jobTitle) ? jobTitle : @"" forKey:@"jobTitle"];
     }
 
+    
+    if (birthday) {
+        if (birthday.month != NSDateComponentUndefined && birthday.day != NSDateComponentUndefined) {
+            //months are indexed to 0 in JavaScript (0 = January) so we subtract 1 from NSDateComponents.month
+            if (birthday.year != NSDateComponentUndefined) {
+                [output setObject:@{@"year": @(birthday.year), @"month": @(birthday.month - 1), @"day": @(birthday.day)} forKey:@"birthday"];
+            } else {
+                [output setObject:@{@"month": @(birthday.month - 1), @"day":@(birthday.day)} forKey:@"birthday"];
+            }
+        }
+    }
+    
     //handle phone numbers
     NSMutableArray *phoneNumbers = [[NSMutableArray alloc] init];
 
@@ -220,7 +268,11 @@ RCT_EXPORT_METHOD(getAllWithoutPhotos:(RCTResponseSenderBlock) callback)
         if(city){
             [address setObject:city forKey:@"city"];
         }
-        NSString* region = postalAddress.city;
+        NSString* state = postalAddress.state;
+        if(state){
+            [address setObject:state forKey:@"state"];
+        }
+        NSString* region = postalAddress.state;
         if(region){
             [address setObject:region forKey:@"region"];
         }
@@ -352,6 +404,37 @@ RCT_EXPORT_METHOD(addContact:(NSDictionary *)contactData callback:(RCTResponseSe
     }
 }
 
+RCT_EXPORT_METHOD(openContactForm:(NSDictionary *)contactData callback:(RCTResponseSenderBlock)callback)
+{
+    CNContactStore* contactStore = [self contactsStore:callback];
+    if(!contactStore)
+        return;
+
+    CNMutableContact * contact = [[CNMutableContact alloc] init];
+
+    [self updateRecord:contact withData:contactData];
+
+    CNContactViewController *controller = [CNContactViewController viewControllerForNewContact:contact];
+
+    controller.delegate = self;
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UINavigationController* navigation = [[UINavigationController alloc] initWithRootViewController:controller];
+        UINavigationController *viewController = (UINavigationController*)[[[[UIApplication sharedApplication] delegate] window] rootViewController];
+        [viewController presentViewController:navigation animated:YES completion:nil];
+
+        NSDictionary *contactDict = [self contactToDictionary:contact withThumbnails:false];
+
+        callback(@[[NSNull null], contactDict]);
+    });
+
+}
+
+//dismiss open contact page after done or cancel is clicked
+- (void)contactViewController:(CNContactViewController *)viewController didCompleteWithContact:(CNContact *)contact {
+    [viewController dismissViewControllerAnimated:YES completion:nil];
+}
+
 RCT_EXPORT_METHOD(updateContact:(NSDictionary *)contactData callback:(RCTResponseSenderBlock)callback)
 {
     CNContactStore* contactStore = [self contactsStore:callback];
@@ -371,7 +454,8 @@ RCT_EXPORT_METHOD(updateContact:(NSDictionary *)contactData callback:(RCTRespons
                              CNContactJobTitleKey,
                              CNContactImageDataAvailableKey,
                              CNContactThumbnailImageDataKey,
-                             CNContactImageDataKey
+                             CNContactImageDataKey,
+                             CNContactBirthdayKey
                              ];
 
     @try {
@@ -398,13 +482,33 @@ RCT_EXPORT_METHOD(updateContact:(NSDictionary *)contactData callback:(RCTRespons
     NSString *middleName = [contactData valueForKey:@"middleName"];
     NSString *company = [contactData valueForKey:@"company"];
     NSString *jobTitle = [contactData valueForKey:@"jobTitle"];
-
+    NSDictionary *birthday = [contactData valueForKey:@"birthday"];
+    
     contact.givenName = givenName;
     contact.familyName = familyName;
     contact.middleName = middleName;
     contact.organizationName = company;
     contact.jobTitle = jobTitle;
+    
+    if (birthday) {
+        NSDateComponents *components;
+        if (contact.birthday != nil) {
+            components = contact.birthday;
+        } else {
+            components = [[NSDateComponents alloc] init];
+        }
+        if (birthday[@"month"] && birthday[@"day"]) {
+            if (birthday[@"year"]) {
+                components.year = [birthday[@"year"] intValue];
+            }
+            //months are indexed to 0 in JavaScript so we add 1 when assigning the month to DateComponent
+            components.month = [birthday[@"month"] intValue] + 1;
+            components.day = [birthday[@"day"] intValue];
+        }
 
+        contact.birthday = components;
+    }
+    
     NSMutableArray *phoneNumbers = [[NSMutableArray alloc]init];
 
     for (id phoneData in [contactData valueForKey:@"phoneNumbers"]) {
@@ -442,7 +546,28 @@ RCT_EXPORT_METHOD(updateContact:(NSDictionary *)contactData callback:(RCTRespons
 
     contact.emailAddresses = emails;
 
-    //todo - update postal addresses
+    NSMutableArray *postalAddresses = [[NSMutableArray alloc]init];
+
+    for (id addressData in [contactData valueForKey:@"postalAddresses"]) {
+        NSString *label = [addressData valueForKey:@"label"];
+        NSString *street = [addressData valueForKey:@"street"];
+        NSString *postalCode = [addressData valueForKey:@"postCode"];
+        NSString *city = [addressData valueForKey:@"city"];
+        NSString *country = [addressData valueForKey:@"country"];
+        NSString *state = [addressData valueForKey:@"state"];
+
+        if(label && street) {
+            CNMutablePostalAddress *postalAddr = [[CNMutablePostalAddress alloc] init];
+            postalAddr.street = street;
+            postalAddr.postalCode = postalCode;
+            postalAddr.city = city;
+            postalAddr.country = country;
+            postalAddr.state = state;
+            [postalAddresses addObject:[[CNLabeledValue alloc] initWithLabel:label value: postalAddr]];
+        }
+    }
+
+    contact.postalAddresses = postalAddresses;
 
     NSString *thumbnailPath = [contactData valueForKey:@"thumbnailPath"];
 
@@ -507,13 +632,21 @@ RCT_EXPORT_METHOD(deleteContact:(NSDictionary *)contactData callback:(RCTRespons
     NSString* recordID = [contactData valueForKey:@"recordID"];
 
     NSArray *keys = @[CNContactIdentifierKey];
-    CNMutableContact *contact = [[contactStore unifiedContactWithIdentifier:recordID keysToFetch:keys error:nil] mutableCopy];
-    NSError *error;
-    CNSaveRequest *saveRequest = [[CNSaveRequest alloc] init];
-    [saveRequest deleteContact:contact];
-    [contactStore executeSaveRequest:saveRequest error:&error];
+    
+    
+    @try {
+        
+        CNMutableContact *contact = [[contactStore unifiedContactWithIdentifier:recordID keysToFetch:keys error:nil] mutableCopy];
+        NSError *error;
+        CNSaveRequest *saveRequest = [[CNSaveRequest alloc] init];
+        [saveRequest deleteContact:contact];
+        [contactStore executeSaveRequest:saveRequest error:&error];
 
-    callback(@[[NSNull null], [NSNull null]]);
+        callback(@[[NSNull null], recordID]);
+    }
+    @catch (NSException *exception) {
+        callback(@[[exception description], [NSNull null]]);
+    }
 }
 
 -(CNContactStore*) contactsStore: (RCTResponseSenderBlock)callback {
@@ -537,6 +670,11 @@ RCT_EXPORT_METHOD(deleteContact:(NSDictionary *)contactData callback:(RCTRespons
     }
 
     return contactStore;
+}
+
++ (BOOL)requiresMainQueueSetup
+{
+    return YES;
 }
 
 @end
